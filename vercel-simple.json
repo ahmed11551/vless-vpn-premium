@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "name": "vless-vpn-premium",
   "builds": [
     {
       "src": "client/package.json",
@@ -14,10 +15,5 @@
       "src": "/(.*)",
       "dest": "/client/$1"
     }
-  ],
-  "env": {
-    "NODE_ENV": "production"
-  },
-  "installCommand": "cd client && npm install --legacy-peer-deps",
-  "buildCommand": "cd client && npm run build"
+  ]
 }
