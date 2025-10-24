@@ -1,520 +1,556 @@
-const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios');
-const moment = require('moment');
-require('dotenv').config();
+import { Telegraf, Markup, session } from 'telegraf';
+import dotenv from 'dotenv';
+import cron from 'node-cron';
+import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
+import moment from 'moment';
+import axios from 'axios';
 
+// Загружаем переменные окружения
+dotenv.config();
+
+const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN || '');
 const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:3001/api';
 
-class VlessVpnBot {
-  constructor() {
-    this.bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
-    this.setupHandlers();
+// Состояния пользователей
+const userStates = new Map();
+
+// Конфигурация бота
+const BOT_CONFIG = {
+  name: 'VLESS VPN Premium',
+  version: '1.0.0',
+  supportChat: '@vless_support',
+  website: 'https://vless-vpn-premium.netlify.app',
+  adminId: process.env.ADMIN_ID || '',
+};
+
+// Тарифы
+const PLANS = {
+  basic: {
+    name: 'Базовый',
+    price: 299,
+    duration: 30,
+    features: ['Неограниченный трафик', 'Высокая скорость', 'Поддержка всех устройств'],
+    description: 'Идеально для личного использования'
+  },
+  premium: {
+    name: 'Премиум',
+    price: 599,
+    duration: 30,
+    features: ['Неограниченный трафик', 'Максимальная скорость', 'Приоритетная поддержка', 'Дополнительные серверы'],
+    description: 'Для требовательных пользователей'
+  },
+  pro: {
+    name: 'Профи',
+    price: 999,
+    duration: 30,
+    features: ['Неограниченный трафик', 'Максимальная скорость', 'VIP поддержка', 'Все серверы', 'Персональный менеджер'],
+    description: 'Для бизнеса и профессионалов'
   }
+};
 
-  setupHandlers() {
-    // Start command
-    this.bot.onText(/\/start/, (msg) => {
-      this.handleStart(msg);
-    });
+// Функции для работы с API
+const api = {
+  async createUser(telegramId, username, firstName, lastName) {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/users`, {
+        telegramId,
+        username,
+        firstName,
+        lastName,
+        source: 'telegram'
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error creating user:', error);
+      return null;
+    }
+  },
 
-    // Help command
-    this.bot.onText(/\/help/, (msg) => {
-      this.handleHelp(msg);
-    });
+  async getUser(telegramId) {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/users/telegram/${telegramId}`);
+      return response.data;
+    } catch (error) {
+      console.error('Error getting user:', error);
+      return null;
+    }
+  },
 
-    // Get trial key
-    this.bot.onText(/\/trial/, (msg) => {
-      this.handleTrialKey(msg);
-    });
+  async createVpnKey(userId, plan) {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/vpn/keys`, {
+        userId,
+        plan,
+        source: 'telegram'
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error creating VPN key:', error);
+      return null;
+    }
+  },
 
-    // Get pricing
-    this.bot.onText(/\/pricing/, (msg) => {
-      this.handlePricing(msg);
-    });
+  async getUserKeys(userId) {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/vpn/keys/user/${userId}`);
+      return response.data;
+    } catch (error) {
+      console.error('Error getting user keys:', error);
+      return [];
+    }
+  },
 
-    // Support
-    this.bot.onText(/\/support/, (msg) => {
-      this.handleSupport(msg);
-    });
-
-    // Callback queries
-    this.bot.on('callback_query', (callbackQuery) => {
-      this.handleCallbackQuery(callbackQuery);
-    });
-
-    // Error handling
-    this.bot.on('error', (error) => {
-      console.error('Bot error:', error);
-    });
+  async createPayment(userId, plan, amount) {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/payments`, {
+        userId,
+        plan,
+        amount,
+        source: 'telegram'
+      });
+      return response.data;
+    } catch (error) {
+      console.error('Error creating payment:', error);
+      return null;
+    }
   }
+};
 
-  async handleStart(msg) {
-    const chatId = msg.chat.id;
-    const firstName = msg.from.first_name;
+// Утилиты
+const utils = {
+  generateVpnKey() {
+    return uuidv4().replace(/-/g, '');
+  },
 
-    const welcomeMessage = `
-🚀 Добро пожаловать в VLESS VPN Premium, ${firstName}!
+  formatDate(date) {
+    return moment(date).format('DD.MM.YYYY HH:mm');
+  },
 
-🔐 Получите быстрый и безопасный VPN доступ к интернету без ограничений.
+  formatPrice(price) {
+    return `${price} ₽`;
+  },
 
-📱 Выберите действие:
-`;
-
-    const keyboard = {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '🆓 Получить пробный ключ', callback_data: 'trial_key' },
-            { text: '💰 Тарифы', callback_data: 'pricing' }
-          ],
-          [
-            { text: '📖 Инструкция', callback_data: 'instructions' },
-            { text: '🆘 Поддержка', callback_data: 'support' }
-          ],
-          [
-            { text: '👥 Реферальная программа', callback_data: 'referral' }
-          ]
-        ]
-      }
+  getPlanEmoji(plan) {
+    const emojis = {
+      basic: '🟢',
+      premium: '🟡',
+      pro: '🔴'
     };
+    return emojis[plan] || '⚪';
+  }
+};
 
-    this.bot.sendMessage(chatId, welcomeMessage, keyboard);
+// Middleware для сессий
+bot.use(session());
+
+// Команда /start
+bot.start(async (ctx) => {
+  const user = ctx.from;
+  const chatId = ctx.chat.id;
+  
+  // Регистрируем или получаем пользователя
+  let dbUser = await api.getUser(user.id);
+  if (!dbUser) {
+    dbUser = await api.createUser(user.id, user.username, user.first_name, user.last_name);
   }
 
-  async handleTrialKey(msg) {
-    const chatId = msg.chat.id;
+  // Сохраняем состояние
+  userStates.set(chatId, { userId: dbUser?.id, step: 'main' });
+
+  const welcomeText = `
+🚀 Добро пожаловать в ${BOT_CONFIG.name}!
+
+Я помогу вам:
+• 🔐 Получить VPN ключи
+• 💳 Оплатить подписку
+• 📊 Проверить статус
+• 🆘 Получить поддержку
+
+Выберите действие:
+  `;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🛒 Тарифы', 'plans')],
+    [Markup.button.callback('🔑 Мои ключи', 'my_keys'), Markup.button.callback('📊 Статистика', 'stats')],
+    [Markup.button.callback('💳 Оплата', 'payment'), Markup.button.callback('🆘 Поддержка', 'support')],
+    [Markup.button.callback('ℹ️ О боте', 'about')]
+  ]);
+
+  await ctx.reply(welcomeText, keyboard);
+});
+
+// Обработка кнопок
+bot.action('plans', async (ctx) => {
+  let plansText = '📋 Доступные тарифы:\n\n';
+  
+  Object.entries(PLANS).forEach(([key, plan]) => {
+    plansText += `${utils.getPlanEmoji(key)} *${plan.name}*\n`;
+    plansText += `💰 ${utils.formatPrice(plan.price)} / ${plan.duration} дней\n`;
+    plansText += `📝 ${plan.description}\n\n`;
+    plansText += `✨ Возможности:\n`;
+    plan.features.forEach(feature => {
+      plansText += `• ${feature}\n`;
+    });
+    plansText += '\n';
+  });
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🟢 Базовый', 'buy_basic')],
+    [Markup.button.callback('🟡 Премиум', 'buy_premium')],
+    [Markup.button.callback('🔴 Профи', 'buy_pro')],
+    [Markup.button.callback('🔙 Назад', 'back_to_main')]
+  ]);
+
+  await ctx.editMessageText(plansText, { 
+    parse_mode: 'Markdown',
+    ...keyboard 
+  });
+});
+
+bot.action('my_keys', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const userState = userStates.get(chatId);
+  
+  if (!userState?.userId) {
+    await ctx.answerCbQuery('❌ Пользователь не найден');
+    return;
+  }
+
+  const keys = await api.getUserKeys(userState.userId);
+  
+  if (keys.length === 0) {
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('🛒 Купить тариф', 'plans')],
+      [Markup.button.callback('🔙 Назад', 'back_to_main')]
+    ]);
     
-    const categoryMessage = `
-🆓 Выберите категорию для пробного ключа:
-
-Каждый пробный ключ действует 24 часа и дает полный доступ к сервису.
-`;
-
-    const keyboard = {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '📱 Instagram', callback_data: 'trial_instagram' },
-            { text: '🎥 YouTube', callback_data: 'trial_youtube' }
-          ],
-          [
-            { text: '💬 ChatGPT', callback_data: 'trial_chatgpt' },
-            { text: '🎨 Canva', callback_data: 'trial_canva' }
-          ],
-          [
-            { text: '📞 Zoom', callback_data: 'trial_zoom' },
-            { text: '🎮 Discord', callback_data: 'trial_discord' }
-          ],
-          [
-            { text: '📱 TikTok', callback_data: 'trial_tiktok' },
-            { text: '🌐 Общий доступ', callback_data: 'trial_general' }
-          ],
-          [
-            { text: '🔙 Назад', callback_data: 'back_to_main' }
-          ]
-        ]
-      }
-    };
-
-    this.bot.sendMessage(chatId, categoryMessage, keyboard);
+    await ctx.editMessageText('🔑 У вас пока нет VPN ключей.\n\nВыберите тариф для получения ключа:', keyboard);
+    return;
   }
 
-  async handlePricing(msg) {
-    const chatId = msg.chat.id;
+  let keysText = '🔑 Ваши VPN ключи:\n\n';
+  
+  keys.forEach((key, index) => {
+    keysText += `*Ключ ${index + 1}:*\n`;
+    keysText += `🔑 \`${key.key}\`\n`;
+    keysText += `📅 Создан: ${utils.formatDate(key.createdAt)}\n`;
+    keysText += `⏰ Истекает: ${utils.formatDate(key.expiresAt)}\n`;
+    keysText += `📊 Статус: ${key.isActive ? '✅ Активен' : '❌ Неактивен'}\n\n`;
+  });
 
-    try {
-      const response = await axios.get(`${API_BASE_URL}/payments/plans`);
-      const plans = response.data.data.plans;
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🔄 Обновить', 'my_keys')],
+    [Markup.button.callback('🔙 Назад', 'back_to_main')]
+  ]);
 
-      let pricingMessage = `💰 Тарифы VLESS VPN Premium:\n\n`;
+  await ctx.editMessageText(keysText, { 
+    parse_mode: 'Markdown',
+    ...keyboard 
+  });
+});
 
-      plans.forEach(plan => {
-        const durationText = plan.duration === 1 ? 'месяц' : 
-                            plan.duration === 2 ? 'месяца' : 'месяца';
-        
-        pricingMessage += `🔥 ${plan.name} - ${plan.price} ₽/${durationText}\n`;
-        plan.features.forEach(feature => {
-          pricingMessage += `✅ ${feature}\n`;
-        });
-        pricingMessage += `\n`;
-      });
-
-      pricingMessage += `💳 Способы оплаты:\n`;
-      pricingMessage += `• Банковские карты РФ\n`;
-      pricingMessage += `• СБП\n`;
-      pricingMessage += `• Криптовалюта\n`;
-      pricingMessage += `• Telegram Stars\n`;
-
-      const keyboard = {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '💳 Купить Premium', callback_data: 'buy_premium' },
-              { text: '💳 Купить Pro', callback_data: 'buy_pro' }
-            ],
-            [
-              { text: '🔙 Назад', callback_data: 'back_to_main' }
-            ]
-          ]
-        }
-      };
-
-      this.bot.sendMessage(chatId, pricingMessage, keyboard);
-    } catch (error) {
-      console.error('Error getting pricing:', error);
-      this.bot.sendMessage(chatId, '❌ Ошибка получения тарифов. Попробуйте позже.');
-    }
+bot.action('stats', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const userState = userStates.get(chatId);
+  
+  if (!userState?.userId) {
+    await ctx.answerCbQuery('❌ Пользователь не найден');
+    return;
   }
 
-  async handleSupport(msg) {
-    const chatId = msg.chat.id;
+  const user = await api.getUser(ctx.from.id);
+  const keys = await api.getUserKeys(userState.userId);
+  
+  const statsText = `
+📊 Ваша статистика:
 
-    const supportMessage = `
-🆘 Техническая поддержка VLESS VPN Premium
+👤 Пользователь: ${user?.firstName || 'Неизвестно'}
+📅 Регистрация: ${user ? utils.formatDate(user.createdAt) : 'Неизвестно'}
+🔑 Ключей: ${keys.length}
+✅ Активных: ${keys.filter(k => k.isActive).length}
+❌ Неактивных: ${keys.filter(k => !k.isActive).length}
 
-📞 Способы связи:
-• Telegram: @vless_support
-• Email: support@vless-vpn.org
-• Время работы: 24/7
+💡 Для получения новых ключей выберите тариф!
+  `;
 
-🔧 Частые проблемы:
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🛒 Купить тариф', 'plans')],
+    [Markup.button.callback('🔙 Назад', 'back_to_main')]
+  ]);
 
-❓ VPN не подключается?
-• Проверьте интернет-соединение
-• Перезапустите приложение
-• Попробуйте другой сервер
+  await ctx.editMessageText(statsText, keyboard);
+});
 
-❓ Ключ не работает?
-• Проверьте срок действия
-• Убедитесь в правильности ключа
-• Обратитесь в поддержку
-
-❓ Медленная скорость?
-• Попробуйте сервер ближе к вам
-• Проверьте нагрузку на сервер
-• Перезапустите соединение
-`;
-
-    const keyboard = {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '📞 Связаться с поддержкой', url: 'https://t.me/vless_support' }
-          ],
-          [
-            { text: '🔙 Назад', callback_data: 'back_to_main' }
-          ]
-        ]
-      }
-    };
-
-    this.bot.sendMessage(chatId, supportMessage, keyboard);
-  }
-
-  async handleCallbackQuery(callbackQuery) {
-    const chatId = callbackQuery.message.chat.id;
-    const data = callbackQuery.data;
-
-    try {
-      switch (data) {
-        case 'trial_key':
-          await this.handleTrialKey({ chat: { id: chatId } });
-          break;
-
-        case 'pricing':
-          await this.handlePricing({ chat: { id: chatId } });
-          break;
-
-        case 'support':
-          await this.handleSupport({ chat: { id: chatId } });
-          break;
-
-        case 'instructions':
-          await this.handleInstructions(chatId);
-          break;
-
-        case 'referral':
-          await this.handleReferral(chatId);
-          break;
-
-        case 'back_to_main':
-          await this.handleStart({ chat: { id: chatId }, from: { first_name: 'Пользователь' } });
-          break;
-
-        default:
-          if (data.startsWith('trial_')) {
-            await this.generateTrialKey(chatId, data);
-          } else if (data.startsWith('buy_')) {
-            await this.handlePurchase(chatId, data);
-          }
-          break;
-      }
-
-      // Answer callback query
-      this.bot.answerCallbackQuery(callbackQuery.id);
-    } catch (error) {
-      console.error('Callback query error:', error);
-      this.bot.answerCallbackQuery(callbackQuery.id, { text: 'Произошла ошибка. Попробуйте позже.' });
-    }
-  }
-
-  async generateTrialKey(chatId, category) {
-    try {
-      // Generate trial key logic
-      const keyId = require('uuid').v4();
-      const key = `vless-trial-${keyId}`;
-      
-      const categoryNames = {
-        'trial_instagram': 'Instagram',
-        'trial_youtube': 'YouTube',
-        'trial_chatgpt': 'ChatGPT',
-        'trial_canva': 'Canva',
-        'trial_zoom': 'Zoom',
-        'trial_discord': 'Discord',
-        'trial_tiktok': 'TikTok',
-        'trial_general': 'Общий доступ'
-      };
-
-      const categoryName = categoryNames[category] || 'Общий доступ';
-
-      const keyMessage = `
-🎉 Пробный ключ для ${categoryName} готов!
-
-🔑 Ваш ключ: \`${key}\`
-
-⏰ Срок действия: 24 часа
-🌍 Доступные сервера: Все
-📊 Трафик: Безлимитный
-
-📱 Как подключиться:
-1. Скачайте приложение VLESS
-2. Добавьте ключ в приложение
-3. Выберите сервер
-4. Нажмите "Подключить"
-
-💡 Совет: Для лучшей скорости выберите сервер ближе к вам!
-`;
-
-      const keyboard = {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '📱 Скачать приложение', url: 'https://github.com/v2ray/v2ray-core/releases' }
-            ],
-            [
-              { text: '📖 Подробная инструкция', callback_data: 'instructions' }
-            ],
-            [
-              { text: '🔙 Главное меню', callback_data: 'back_to_main' }
-            ]
-          ]
-        }
-      };
-
-      this.bot.sendMessage(chatId, keyMessage, { 
-        ...keyboard,
-        parse_mode: 'Markdown'
-      });
-
-    } catch (error) {
-      console.error('Error generating trial key:', error);
-      this.bot.sendMessage(chatId, '❌ Ошибка генерации ключа. Попробуйте позже.');
-    }
-  }
-
-  async handleInstructions(chatId) {
-    const instructionsMessage = `
-📖 Инструкция по подключению VLESS VPN
-
-📱 Для Android:
-1. Скачайте приложение "v2rayNG" из Google Play
-2. Откройте приложение и нажмите "+"
-3. Выберите "Сканировать QR-код" или "Ввести вручную"
-4. Вставьте ваш ключ VLESS
-5. Нажмите "Подключить"
-
-💻 Для Windows:
-1. Скачайте "v2rayN" с GitHub
-2. Запустите программу
-3. Нажмите "Сервер" → "Добавить сервер"
-4. Вставьте ваш ключ VLESS
-5. Нажмите "Подключить"
-
-🍎 Для iOS:
-1. Скачайте "Shadowrocket" из App Store
-2. Откройте приложение
-3. Нажмите "+" → "Тип: VLESS"
-4. Вставьте ваш ключ VLESS
-5. Нажмите "Подключить"
-
-🔧 Настройки:
-• Шифрование: none
-• Сеть: WebSocket
-• TLS: включен
-• SNI: ваш домен сервера
-
-❓ Проблемы?
-Обратитесь в поддержку: @vless_support
-`;
-
-    const keyboard = {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '📱 Скачать приложения', url: 'https://github.com/v2ray/v2ray-core/releases' }
-          ],
-          [
-            { text: '🔙 Назад', callback_data: 'back_to_main' }
-          ]
-        ]
-      }
-    };
-
-    this.bot.sendMessage(chatId, instructionsMessage, keyboard);
-  }
-
-  async handleReferral(chatId) {
-    const referralMessage = `
-👥 Реферальная программа VLESS VPN Premium
-
-💰 Зарабатывайте на приглашениях!
-
-🎯 Как это работает:
-• Приглашайте друзей по вашей ссылке
-• За каждого друга получаете 7 дней VPN бесплатно
-• За каждый платеж друга получаете 20% от суммы
-• Деньги можно выводить на карту или тратить на VPN
-
-📊 Примеры заработка:
-• 10 приглашений = 70 дней VPN бесплатно
-• Друг купил Premium (450₽) = вы получаете 90₽
-• Друг купил Pro (590₽) = вы получаете 118₽
-
-🔗 Ваша реферальная ссылка:
-https://t.me/vless_vpn_shop_bot?start=ref_${chatId}
-
-📈 Статистика:
-• Приглашено: 0 человек
-• Заработано: 0₽
-• Бесплатных дней: 0
-
-💡 Совет: Делитесь ссылкой в социальных сетях и мессенджерах!
-`;
-
-    const keyboard = {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '📤 Поделиться ссылкой', url: `https://t.me/share/url?url=https://t.me/vless_vpn_shop_bot?start=ref_${chatId}&text=🚀%20Попробуй%20VLESS%20VPN%20Premium!` }
-          ],
-          [
-            { text: '🔙 Назад', callback_data: 'back_to_main' }
-          ]
-        ]
-      }
-    };
-
-    this.bot.sendMessage(chatId, referralMessage, keyboard);
-  }
-
-  async handlePurchase(chatId, plan) {
-    const planNames = {
-      'buy_premium': 'Premium (2 месяца)',
-      'buy_pro': 'Pro (3 месяца)'
-    };
-
-    const planPrices = {
-      'buy_premium': 450,
-      'buy_pro': 590
-    };
-
-    const planName = planNames[plan];
-    const price = planPrices[plan];
-
-    const purchaseMessage = `
-💳 Покупка тарифа "${planName}"
-
-💰 Стоимость: ${price} ₽
-
+bot.action('payment', async (ctx) => {
+  const paymentText = `
 💳 Способы оплаты:
-• Банковские карты РФ
-• СБП (Система быстрых платежей)
-• Криптовалюта (Bitcoin, Ethereum)
-• Telegram Stars
 
-🔄 После оплаты:
-• Ключ будет отправлен автоматически
-• Подписка активируется на ${planName.includes('2') ? '2' : '3'} месяца
-• Доступ ко всем серверам
-• Техническая поддержка 24/7
+• 💳 Банковская карта (Visa, MasterCard)
+• 📱 СБП (Система быстрых платежей)
+• 💰 Криптовалюта (Bitcoin, Ethereum)
+• ⭐ Telegram Stars (скоро)
 
-📞 Нужна помощь с оплатой?
-Обратитесь в поддержку: @vless_support
-`;
+Выберите тариф для оплаты:
+  `;
 
-    const keyboard = {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '💳 Оплатить картой', callback_data: `pay_card_${plan}` },
-            { text: '📱 Оплатить СБП', callback_data: `pay_sbp_${plan}` }
-          ],
-          [
-            { text: '₿ Оплатить криптовалютой', callback_data: `pay_crypto_${plan}` },
-            { text: '⭐ Telegram Stars', callback_data: `pay_stars_${plan}` }
-          ],
-          [
-            { text: '🔙 Назад к тарифам', callback_data: 'pricing' }
-          ]
-        ]
-      }
-    };
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🟢 Базовый', 'buy_basic')],
+    [Markup.button.callback('🟡 Премиум', 'buy_premium')],
+    [Markup.button.callback('🔴 Профи', 'buy_pro')],
+    [Markup.button.callback('🔙 Назад', 'back_to_main')]
+  ]);
 
-    this.bot.sendMessage(chatId, purchaseMessage, keyboard);
+  await ctx.editMessageText(paymentText, keyboard);
+});
+
+bot.action('support', async (ctx) => {
+  const supportText = `
+🆘 Поддержка
+
+Если у вас возникли вопросы или проблемы:
+
+📞 Техподдержка: @vless_support
+🌐 Сайт: ${BOT_CONFIG.website}
+📧 Email: support@vless-vpn.org
+
+⏰ Время работы: 24/7
+⚡ Ответ в течение 15 минут
+
+Частые вопросы:
+• Как подключиться к VPN?
+• Как продлить подписку?
+• Проблемы с подключением?
+  `;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.url('💬 Написать в поддержку', 'https://t.me/vless_support')],
+    [Markup.button.url('🌐 Перейти на сайт', BOT_CONFIG.website)],
+    [Markup.button.callback('🔙 Назад', 'back_to_main')]
+  ]);
+
+  await ctx.editMessageText(supportText, keyboard);
+});
+
+bot.action('about', async (ctx) => {
+  const aboutText = `
+ℹ️ О боте
+
+${BOT_CONFIG.name} v${BOT_CONFIG.version}
+
+🚀 Современный VPN сервис с поддержкой протокола VLESS
+🔐 Максимальная безопасность и приватность
+⚡ Высокая скорость подключения
+🌍 Серверы по всему миру
+📱 Поддержка всех устройств
+
+✨ Особенности:
+• Неограниченный трафик
+• Высокая скорость
+• Стабильное соединение
+• Круглосуточная поддержка
+• Простота использования
+
+Создано командой VLESS Premium Team
+  `;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.url('🌐 Сайт', BOT_CONFIG.website)],
+    [Markup.button.url('💬 Поддержка', 'https://t.me/vless_support')],
+    [Markup.button.callback('🔙 Назад', 'back_to_main')]
+  ]);
+
+  await ctx.editMessageText(aboutText, keyboard);
+});
+
+// Обработка покупки тарифов
+bot.action(/^buy_(.+)$/, async (ctx) => {
+  const planType = ctx.match[1];
+  const plan = PLANS[planType];
+  
+  if (!plan) {
+    await ctx.answerCbQuery('❌ Тариф не найден');
+    return;
   }
 
-  async handleHelp(msg) {
-    const chatId = msg.chat.id;
-
-    const helpMessage = `
-🆘 Помощь по использованию бота
-
-📋 Основные команды:
-/start - Главное меню
-/trial - Получить пробный ключ
-/pricing - Посмотреть тарифы
-/support - Техническая поддержка
-/help - Эта справка
-
-🔧 Частые вопросы:
-
-❓ Как получить пробный ключ?
-• Нажмите /trial или кнопку "Получить пробный ключ"
-• Выберите категорию использования
-• Получите ключ на 24 часа
-
-❓ Как купить подписку?
-• Нажмите /pricing или кнопку "Тарифы"
-• Выберите подходящий план
-• Оплатите любым удобным способом
-
-❓ VPN не работает?
-• Проверьте правильность ключа
-• Убедитесь в активной подписке
-• Попробуйте другой сервер
-• Обратитесь в поддержку
-
-📞 Поддержка: @vless_support
-🌐 Сайт: https://vless-vpn.org
-`;
-
-    this.bot.sendMessage(chatId, helpMessage);
+  const chatId = ctx.chat.id;
+  const userState = userStates.get(chatId);
+  
+  if (!userState?.userId) {
+    await ctx.answerCbQuery('❌ Пользователь не найден');
+    return;
   }
-}
 
-// Start the bot
-const bot = new VlessVpnBot();
+  const paymentText = `
+🛒 Покупка тарифа "${plan.name}"
 
-console.log('🤖 VLESS VPN Premium Bot started successfully!');
+💰 Стоимость: ${utils.formatPrice(plan.price)}
+📅 Длительность: ${plan.duration} дней
 
-module.exports = VlessVpnBot;
+✨ Включено:
+${plan.features.map(feature => `• ${feature}`).join('\n')}
+
+Выберите способ оплаты:
+  `;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('💳 Банковская карта', `pay_card_${planType}`)],
+    [Markup.button.callback('📱 СБП', `pay_sbp_${planType}`)],
+    [Markup.button.callback('💰 Криптовалюта', `pay_crypto_${planType}`)],
+    [Markup.button.callback('🔙 Назад', 'plans')]
+  ]);
+
+  await ctx.editMessageText(paymentText, keyboard);
+});
+
+// Обработка платежей
+bot.action(/^pay_(.+)_(.+)$/, async (ctx) => {
+  const paymentMethod = ctx.match[1];
+  const planType = ctx.match[2];
+  const plan = PLANS[planType];
+  
+  if (!plan) {
+    await ctx.answerCbQuery('❌ Тариф не найден');
+    return;
+  }
+
+  const chatId = ctx.chat.id;
+  const userState = userStates.get(chatId);
+  
+  if (!userState?.userId) {
+    await ctx.answerCbQuery('❌ Пользователь не найден');
+    return;
+  }
+
+  // Создаем платеж
+  const payment = await api.createPayment(userState.userId, planType, plan.price);
+  
+  if (!payment) {
+    await ctx.answerCbQuery('❌ Ошибка создания платежа');
+    return;
+  }
+
+  let paymentText = '';
+  let keyboard;
+
+  switch (paymentMethod) {
+    case 'card':
+      paymentText = `
+💳 Оплата банковской картой
+
+💰 Сумма: ${utils.formatPrice(plan.price)}
+🆔 ID платежа: ${payment.id}
+
+Перейдите по ссылке для оплаты:
+      `;
+      keyboard = Markup.inlineKeyboard([
+        [Markup.button.url('💳 Оплатить', payment.paymentUrl)],
+        [Markup.button.callback('✅ Я оплатил', `check_payment_${payment.id}`)],
+        [Markup.button.callback('🔙 Назад', 'plans')]
+      ]);
+      break;
+      
+    case 'sbp':
+      paymentText = `
+📱 Оплата через СБП
+
+💰 Сумма: ${utils.formatPrice(plan.price)}
+🆔 ID платежа: ${payment.id}
+
+QR-код для оплаты:
+      `;
+      keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('📱 Показать QR', `show_qr_${payment.id}`)],
+        [Markup.button.callback('✅ Я оплатил', `check_payment_${payment.id}`)],
+        [Markup.button.callback('🔙 Назад', 'plans')]
+      ]);
+      break;
+      
+    case 'crypto':
+      paymentText = `
+💰 Оплата криптовалютой
+
+💰 Сумма: ${utils.formatPrice(plan.price)}
+🆔 ID платежа: ${payment.id}
+
+Адрес для оплаты:
+      `;
+      keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('💰 Показать адрес', `show_crypto_${payment.id}`)],
+        [Markup.button.callback('✅ Я оплатил', `check_payment_${payment.id}`)],
+        [Markup.button.callback('🔙 Назад', 'plans')]
+      ]);
+      break;
+  }
+
+  await ctx.editMessageText(paymentText, keyboard);
+});
+
+bot.action('back_to_main', async (ctx) => {
+  const welcomeText = `
+🚀 Главное меню
+
+Выберите действие:
+  `;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('🛒 Тарифы', 'plans')],
+    [Markup.button.callback('🔑 Мои ключи', 'my_keys'), Markup.button.callback('📊 Статистика', 'stats')],
+    [Markup.button.callback('💳 Оплата', 'payment'), Markup.button.callback('🆘 Поддержка', 'support')],
+    [Markup.button.callback('ℹ️ О боте', 'about')]
+  ]);
+
+  await ctx.editMessageText(welcomeText, keyboard);
+});
+
+// Обработка текстовых сообщений
+bot.on('text', async (ctx) => {
+  const text = ctx.message.text;
+  const chatId = ctx.chat.id;
+  const userState = userStates.get(chatId);
+
+  // Если пользователь не зарегистрирован
+  if (!userState) {
+    await ctx.reply('👋 Привет! Нажмите /start для начала работы с ботом.');
+    return;
+  }
+
+  // Обработка различных команд
+  switch (text.toLowerCase()) {
+    case 'меню':
+    case 'главная':
+    case 'начать':
+      await ctx.reply('🔙 Возвращаемся в главное меню...');
+      // Здесь можно вызвать функцию главного меню
+      break;
+      
+    case 'помощь':
+    case 'help':
+      await ctx.reply('🆘 Для получения помощи нажмите кнопку "Поддержка" в главном меню или напишите @vless_support');
+      break;
+      
+    default:
+      await ctx.reply('🤔 Не понимаю команду. Используйте кнопки меню или команду /start');
+  }
+});
+
+// Обработка ошибок
+bot.catch((err, ctx) => {
+  console.error('Bot error:', err);
+  ctx.reply('❌ Произошла ошибка. Попробуйте позже или обратитесь в поддержку @vless_support');
+});
+
+// Запуск бота
+bot.launch().then(() => {
+  console.log(`🤖 ${BOT_CONFIG.name} bot started successfully!`);
+  console.log(`📊 Bot version: ${BOT_CONFIG.version}`);
+  console.log(`🌐 Website: ${BOT_CONFIG.website}`);
+}).catch((error) => {
+  console.error('Failed to start bot:', error);
+});
+
+// Graceful stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+export default bot;
